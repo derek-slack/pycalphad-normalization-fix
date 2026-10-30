@@ -525,15 +525,16 @@ class ModelMQMQA(Model):
 
         Divide by this normalization factor to convert from J/mole-formula to J/mole-atoms
         """
-        return sum(self._n_i(self._dbe, i) for i in self.cations + self.anions if "VA" not in i.constituents)
+        return sum(self._n_i(self._dbe, i) * sum(i.constituents.values()) for i in self.cations + self.anions if "VA" not in i.constituents)  # PATCH: count atoms, not species (dimers)
 
     def moles(self, species, per_formula_unit=False):
         "Number of moles of species or elements."
         species = v.Species(species)
         result = S.Zero
         for i in self.cations + self.anions:
-            if list(species.constituents.keys())[0] in i.constituents:
-                result += self._n_i(self._dbe, i)
+            el = list(species.constituents.keys())[0]
+            if el in i.constituents:
+                result += self._n_i(self._dbe, i) * i.constituents[el]  # PATCH: multi-atom species (e.g. Al2+6 dimer)
         if per_formula_unit:
             return result
         else:
@@ -676,7 +677,11 @@ class ModelMQMQA(Model):
                     mixing_term += Xi_ikl**p_alpha * Xi_ilk**q_alpha / (Xi_ikl + Xi_ilk)**(p_alpha + q_alpha)
                 else:
                     raise ValueError(f"Unknown mixing code {mixing_code} for parameter {param}")
-                if m != v.Species(None):
+                if m != v.Species(None) and m in cations:
+                    # PATCH (local extension, not in Poschmann/FactSage): third CATION on an anion-mixing term,
+                    # weighted by its site-equivalent fraction Y_m (Poschmann Eq. 11) to the power r. Zero when m is absent.
+                    mixing_term *= self._Y_i(m) ** r_alpha
+                elif m != v.Species(None):
                     # Poschmann Eq. 25 and 26 ternary term (same for both mixing codes)
                     Xi_ikl = self._Xi_mix(dbe, A, A, X, Y)
                     Xi_ilk = self._Xi_mix(dbe, A, A, Y, X)
@@ -691,13 +696,17 @@ class ModelMQMQA(Model):
                         mixing_term *= Y_im * (1 - Xi_ikl - Xi_ilk)**(r_alpha - 1)
             elif A != B and X != Y:
                 # Reciprocal mixing
-                if mixing_code != "R":
-                    raise ValueError(f"Unknown mixing code {mixing_code} for parameter {param}. Expected 'R'.")
-                pos_m = [spec for spec in m if spec.charge > 0][0]
-                neg_m = [spec for spec in m if spec.charge < 0][0]
-                quadruplet_mole = X_ijkl(pos_m, pos_m, neg_m, neg_m)
-                mix_term_exponent = [num for num in exponents if num != 0][0]
-                mixing_term += quadruplet_mole ** mix_term_exponent
+                if mixing_code == "G" and not any(exponents):
+                    # PATCH: constant reciprocal-quadruplet energy (FactSage-style Delta g_AB/XY), unweighted
+                    mixing_term = S.One
+                else:
+                    if mixing_code != "R":
+                        raise ValueError(f"Unknown mixing code {mixing_code} for parameter {param}. Expected 'R'.")
+                    pos_m = [spec for spec in m if spec.charge > 0][0]
+                    neg_m = [spec for spec in m if spec.charge < 0][0]
+                    quadruplet_mole = X_ijkl(pos_m, pos_m, neg_m, neg_m)
+                    mix_term_exponent = [num for num in exponents if num != 0][0]
+                    mixing_term += quadruplet_mole ** mix_term_exponent
             else:
                 mixing_term = S.One  # No mixing, this is a modification to the formation energy of this quadruplet
             g = param["parameter"] * mixing_term
